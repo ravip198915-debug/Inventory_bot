@@ -2050,64 +2050,48 @@ def handle_excel_upload(message):
             return
 
         inserted = 0
-        skipped = 0
 
         for raw_serial in df["serial_number"]:
-
-            if inserted >= data["qty"]:
-                skipped += 1
-                continue
-
             if pd.isna(raw_serial):
-                skipped += 1
                 continue
 
             serial = str(raw_serial).strip().upper().replace(" ", "")
 
             if not serial:
-                skipped += 1
                 continue
 
-            cursor.execute("SELECT 1 FROM spare_outward WHERE serial_number=?", (serial,))
-            if cursor.fetchone():
-                skipped += 1
+            try:
+                cursor.execute("""
+                INSERT INTO spare_outward(
+                dispatch_date,
+                district,
+                courier_name,
+                lr_number,
+                spare_name,
+                qty,
+                serial_number,
+                remarks,
+                created_date
+                )
+                VALUES(?,?,?,?,?,?,?,?,?)
+                """, (
+                data["date"],
+                data["district"],
+                data["courier"],
+                data["lr"],
+                data["spare"],
+                1,
+                serial,
+                "",
+                datetime.now().strftime("%d-%m-%Y")
+                ))
+                inserted += 1
+            except Exception:
                 continue
-
-            cursor.execute("SELECT 1 FROM devices WHERE serial_number=?", (serial,))
-            if not cursor.fetchone():
-                skipped += 1
-                continue
-
-            cursor.execute("""
-            INSERT INTO spare_outward(
-            dispatch_date,
-            district,
-            courier_name,
-            lr_number,
-            spare_name,
-            qty,
-            serial_number,
-            remarks,
-            created_date
-            )
-            VALUES(?,?,?,?,?,?,?,?,?)
-            """, (
-            data["date"],
-            data["district"],
-            data["courier"],
-            data["lr"],
-            data["spare"],
-            1,
-            serial,
-            "",
-            datetime.now().strftime("%d-%m-%Y")
-            ))
-
-            inserted += 1
 
         conn.commit()
 
-        bot.send_message(chat_id, f"✅ Inserted {inserted}, Skipped {skipped}")
+        bot.send_message(chat_id, f"Uploaded Successfully - Inserted {inserted}")
 
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Excel upload failed\n{e}")
@@ -2123,69 +2107,61 @@ def handle_excel_upload(message):
 
 def save_manual_serial(message):
 
-    serial = message.text.strip().upper().replace(" ", "")
+    if message.chat.id not in user_data:
+        return
 
     data = user_data[message.chat.id]
 
-    # ✅ STOCK CHECK (prevents extra serial entry)
-    available = get_available_stock(data["district"], data["spare"])
-
-    remaining = data["qty"] - data["serial_count"]
-
-    if available < 1 or remaining <= 0:
-        bot.send_message(message.chat.id, "❌ No stock available")
-        return
-
     if data["serial_count"] >= data["qty"]:
-        bot.send_message(message.chat.id, "⚠️ Serial limit reached")
+        bot.send_message(message.chat.id, "✅ All serial numbers recorded")
+        del user_data[message.chat.id]
         return
 
-    # 🔒 Duplicate serial protection (already dispatched)
-    cursor.execute("SELECT * FROM spare_outward WHERE serial_number=?", (serial,))
-    if cursor.fetchone():
-        bot.send_message(message.chat.id, "⚠ Serial already dispatched")
+    serial = message.text.strip().upper().replace(" ", "")
+
+    if not serial:
+        msg = bot.send_message(
+            message.chat.id,
+            f"Enter Serial Number ({data['serial_count']+1}/{data['qty']})"
+        )
+        bot.register_next_step_handler(msg, save_manual_serial)
         return
 
-    # 🔎 Check if serial exists in inventory
-    cursor.execute("SELECT * FROM devices WHERE serial_number=?", (serial,))
-    if not cursor.fetchone():
-        bot.send_message(message.chat.id, "⚠ Serial not found in inventory")
-        return
+    try:
+        cursor.execute("""
+        INSERT INTO spare_outward(
+        dispatch_date,
+        district,
+        courier_name,
+        lr_number,
+        spare_name,
+        qty,
+        serial_number,
+        remarks,
+        created_date
+        )
+        VALUES(?,?,?,?,?,?,?,?,?)
+        """,
+        (
 
-    # ✅ INSERT INTO OUTWARD (with district)
-    cursor.execute("""
-    INSERT INTO spare_outward(
-    dispatch_date,
-    district,
-    courier_name,
-    lr_number,
-    spare_name,
-    qty,
-    serial_number,
-    remarks,
-    created_date
-    )
-    VALUES(?,?,?,?,?,?,?,?,?)
-    """,
-    (
+        data["date"],
+        data["district"],
+        data["courier"],
+        data["lr"],
+        data["spare"],
+        1,
+        serial,
+        "",
+        datetime.now().strftime("%d-%m-%Y")
 
-    data["date"],
-    data["district"],   # ✅ IMPORTANT
-    data["courier"],
-    data["lr"],
-    data["spare"],
-    1,
-    serial,
-    "",
-    datetime.now().strftime("%d-%m-%Y")
+        ))
 
-    ))
+        conn.commit()
+        data["serial_count"] += 1
 
-    conn.commit()
+    except Exception:
+        pass
 
-    data["serial_count"] += 1
-
-    # 🔁 Continue until required qty reached
     if data["serial_count"] < data["qty"]:
 
         msg = bot.send_message(
@@ -2199,7 +2175,6 @@ def save_manual_serial(message):
 
         bot.send_message(message.chat.id, "✅ All serial numbers recorded")
 
-        # ✅ CLEAN SESSION
         del user_data[message.chat.id]
 
 def send_large_message(chat_id, text):
