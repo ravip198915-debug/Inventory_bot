@@ -716,6 +716,7 @@ def lr_summary(message):
 # EXCEL REPORT
 from openpyxl import load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
 @bot.message_handler(commands=['report'])
 def report(message):
@@ -729,6 +730,7 @@ def report(message):
     from datetime import datetime
     from openpyxl import load_workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
 
     # ================= RAW DATA =================
     devices_df = pd.read_sql_query("SELECT * FROM devices", conn)
@@ -900,7 +902,6 @@ def report(message):
         iris_df.to_excel(writer, sheet_name="IRIS_Summary", index=False)
         lr_df.to_excel(writer, sheet_name="LR_Summary", index=False)
         send_df.to_excel(writer, sheet_name="SEND_Summary", index=False)
-        district_df.to_excel(writer, sheet_name="District_Spare_Balance", index=False)
 
     # ================= FORMATTING =================
     wb = load_workbook(file)
@@ -920,8 +921,77 @@ def report(message):
         bottom=Side(style='thin')
     )
 
+    # ================= DISTRICT SPARE BALANCE (MANUAL WRITE) =================
+    district_columns = ["spare_name", "opening_qty", "received_qty", "sent_qty", "balance_qty"]
+    district_df = district_df[["district"] + district_columns].copy()
+
+    if "District_Spare_Balance" in wb.sheetnames:
+        del wb["District_Spare_Balance"]
+
+    ws_district = wb.create_sheet("District_Spare_Balance")
+
+    report_date = datetime.now().strftime("%d-%m-%Y")
+    district_names = [d for d in district_df["district"].dropna().unique() if str(d).strip()]
+    title_district = district_names[0] if len(district_names) == 1 else "All"
+    title_text = f"{title_district} District Spare Balance Summary as on {report_date}"
+
+    ws_district.merge_cells("A1:F1")
+    title_cell = ws_district["A1"]
+    title_cell.value = title_text
+    title_cell.font = Font(bold=True, size=16)
+    title_cell.alignment = align
+    for col_idx in range(1, 7):
+        t_cell = ws_district.cell(row=1, column=col_idx)
+        t_cell.alignment = align
+        t_cell.border = border
+
+    district_header_font = Font(bold=True, size=12)
+    section_header_fill = PatternFill(start_color="305496", end_color="305496", fill_type="solid")
+    section_header_font = Font(color="FFFFFF", bold=True)
+
+    current_row = 3
+    for district_name, group_df in district_df.groupby("district", sort=True):
+        ws_district.cell(row=current_row, column=1, value=district_name)
+        ws_district.cell(row=current_row, column=1).font = district_header_font
+        ws_district.cell(row=current_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
+        current_row += 1
+
+        for col_idx, col_name in enumerate(district_columns, start=1):
+            cell = ws_district.cell(row=current_row, column=col_idx, value=col_name)
+            cell.fill = section_header_fill
+            cell.font = section_header_font
+            cell.alignment = align
+            cell.border = border
+
+        current_row += 1
+
+        for _, row_data in group_df[district_columns].iterrows():
+            for col_idx, col_name in enumerate(district_columns, start=1):
+                value = row_data[col_name]
+                cell = ws_district.cell(row=current_row, column=col_idx, value=value)
+                cell.alignment = align
+                cell.border = border
+            current_row += 1
+
+        current_row += 1  # one blank row between district sections
+
+    for col_idx in range(1, 7):
+        col_letter = get_column_letter(col_idx)
+        max_len = 0
+        for row_idx in range(1, ws_district.max_row + 1):
+            value = ws_district.cell(row=row_idx, column=col_idx).value
+            if value is not None:
+                max_len = max(max_len, len(str(value)))
+        ws_district.column_dimensions[col_letter].width = max(12, max_len + 3)
+
+    ws_district.freeze_panes = "A4"
+
     for sheet in wb.sheetnames:
         ws = wb[sheet]
+
+        if sheet == "District_Spare_Balance":
+            continue
+
         ws.freeze_panes = "A2"
 
         # Header
