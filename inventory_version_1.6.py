@@ -851,18 +851,6 @@ def report(message):
 
     send_df.insert(0, "Sl.no", range(1, len(send_df) + 1))
 
-    send_total = pd.DataFrame([{
-        "Sl.no": "",
-        "district": "TOTAL",
-        "courier_name": "",
-        "lr_number": "",
-        "date": "",
-        "spare_name": "",
-        "qty": send_df["qty"].sum()
-    }])
-
-    send_df = pd.concat([send_df, send_total], ignore_index=True)
-
     # ================= DISTRICT SPARE =================
     # ================= DISTRICT SPARE =================
     # ================= DISTRICT SPARE =================
@@ -875,30 +863,6 @@ def report(message):
             SUM(CASE WHEN action='Send' THEN qty ELSE 0 END) AS sent_qty
         FROM spare_inward
         GROUP BY district, spare_name
-    ),
-
-    replacements_agg AS (
-        SELECT 
-            r.replaced_district AS district,
-
-            CASE 
-                WHEN LOWER(model) LIKE '%pos%' THEN 'POS Device'
-                WHEN LOWER(model) LIKE '%iris%' THEN 'IRIS'
-                WHEN LOWER(model) LIKE '%bio%' THEN 'Biometric'
-                WHEN LOWER(model) LIKE '%bat%' THEN 'Battery'
-                WHEN LOWER(model) LIKE '%char%' THEN 'Charger'
-                WHEN LOWER(model) LIKE '%scan%' THEN 'Scanning Glass'
-                ELSE TRIM(model) 
-            END AS spare_name,
-
-            COUNT(*) AS replaced 
-
-        FROM replacements r
-
-        LEFT JOIN devices d 
-            ON r.serial_number = d.serial_number
-
-        GROUP BY r.replaced_district, spare_name
     )
 
     SELECT 
@@ -911,13 +875,7 @@ def report(message):
 
         o.opening_qty + 
         COALESCE(i.received_qty,0) - 
-        COALESCE(i.sent_qty,0) AS balance_qty,
-
-        COALESCE(r.replaced,0) AS replaced,
-        
-        (o.opening_qty + COALESCE(i.received_qty,0) - COALESCE(r.replaced,0)) AS not_replaced,
-
-        (o.opening_qty + COALESCE(i.received_qty,0) - COALESCE(r.replaced,0)) AS faulty_in_district 
+        COALESCE(i.sent_qty,0) AS balance_qty
 
 
     FROM spare_opening_stock o
@@ -925,10 +883,6 @@ def report(message):
     LEFT JOIN inward i 
         ON o.district = i.district 
         AND o.spare_name = i.spare_name
-
-    LEFT JOIN replacements_agg r  
-        ON LOWER(TRIM(o.district)) = LOWER(TRIM(r.district))
-        AND LOWER(TRIM(o.spare_name)) = LOWER(TRIM(r.spare_name))
 
     ORDER BY o.district, o.spare_name
     """, conn)
@@ -953,11 +907,9 @@ def report(message):
 
     header_fill = PatternFill(start_color="305496", fill_type="solid")
     total_fill = PatternFill(start_color="FFD966", fill_type="solid")
-    red_fill = PatternFill(start_color="FF0000", fill_type="solid")
 
     header_font = Font(bold=True, color="FFFFFF")
     total_font = Font(bold=True)
-    red_font = Font(color="FFFFFF", bold=True)
 
     align = Alignment(horizontal="center", vertical="center")
 
@@ -978,13 +930,6 @@ def report(message):
             cell.font = header_font
             cell.alignment = align
             cell.border = border
-
-    # ✅ FIND FAULTY COLUMN (MISSING IN YOUR CODE)
-        faulty_col = None
-        for idx, cell in enumerate(ws[1]):
-            if cell.value in ["faulty_in_district", "Faulty in District"]:
-                faulty_col = idx
-                break
         
         # Rows
         for row in ws.iter_rows(min_row=2):
@@ -996,14 +941,6 @@ def report(message):
                 for cell in row:
                     cell.fill = total_fill
                     cell.font = total_font
-
-        # 🔴 Faulty >= 10 highlight
-            if faulty_col is not None:
-                val = row[faulty_col].value
-                if isinstance(val, (int, float)) and val >= 10:
-                    for cell in row:
-                        cell.fill = red_fill
-                        cell.font = red_font
 
 
         # Auto width
@@ -1737,8 +1674,10 @@ def show_commands(message):
         "📦 Inventory Bot Commands\n\n"
 
         "📥 Stock Entry\n"
+        "/start\n"
         "/inward_spare\n"
         "/add_device\n\n"
+        "/outward_spare\n\n"
 
         "📊 Reports\n"
         "/report\n"
@@ -1763,7 +1702,8 @@ def show_commands(message):
         "/bot_status\n\n"
 
         "🗑 Data Management\n"
-        "/delete SERIAL\n"
+        "/delete\n"
+        "/cancel\n"
     )
 #/bot_status admin command to monitor your system health
 
@@ -2006,7 +1946,108 @@ def serial_method(message):
 
     elif message.text == "📄 Excel Upload":
 
+        user_data[message.chat.id]["mode"] = "excel_upload"
         bot.send_message(message.chat.id,"Upload Excel with serial numbers")
+
+
+@bot.message_handler(content_types=['document'])
+def handle_excel_upload(message):
+
+    chat_id = message.chat.id
+
+    if chat_id not in user_data:
+        return
+
+    data = user_data[chat_id]
+
+    if data.get("mode") != "excel_upload" or data.get("spare") != "POS Device":
+        return
+
+    file_path = None
+
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        file_path = f"temp_{chat_id}.xlsx"
+        with open(file_path, "wb") as f:
+            f.write(downloaded_file)
+
+        df = pd.read_excel(file_path)
+
+        if "serial_number" not in df.columns:
+            bot.send_message(chat_id, "❌ Excel must contain column: serial_number")
+            return
+
+        inserted = 0
+        skipped = 0
+
+        for raw_serial in df["serial_number"]:
+
+            if inserted >= data["qty"]:
+                skipped += 1
+                continue
+
+            if pd.isna(raw_serial):
+                skipped += 1
+                continue
+
+            serial = str(raw_serial).strip().upper().replace(" ", "")
+
+            if not serial:
+                skipped += 1
+                continue
+
+            cursor.execute("SELECT 1 FROM spare_outward WHERE serial_number=?", (serial,))
+            if cursor.fetchone():
+                skipped += 1
+                continue
+
+            cursor.execute("SELECT 1 FROM devices WHERE serial_number=?", (serial,))
+            if not cursor.fetchone():
+                skipped += 1
+                continue
+
+            cursor.execute("""
+            INSERT INTO spare_outward(
+            dispatch_date,
+            district,
+            courier_name,
+            lr_number,
+            spare_name,
+            qty,
+            serial_number,
+            remarks,
+            created_date
+            )
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """, (
+            data["date"],
+            data["district"],
+            data["courier"],
+            data["lr"],
+            data["spare"],
+            1,
+            serial,
+            "",
+            datetime.now().strftime("%d-%m-%Y")
+            ))
+
+            inserted += 1
+
+        conn.commit()
+
+        bot.send_message(chat_id, f"✅ Inserted {inserted}, Skipped {skipped}")
+
+    except Exception as e:
+        bot.send_message(chat_id, f"⚠️ Excel upload failed\n{e}")
+
+    finally:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
+        if chat_id in user_data:
+            del user_data[chat_id]
 
 #8️⃣ Save Manual Serial
 
