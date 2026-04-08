@@ -137,6 +137,7 @@ district TEXT,
 courier_name TEXT,
 lr_number TEXT UNIQUE,
 courier_date TEXT,
+action TEXT,
 spare_name TEXT,
 qty INTEGER,
 remarks TEXT,
@@ -329,6 +330,9 @@ def inward_spare(message):
 
 def inward_district(message):
 
+    if message.chat.id not in user_data:
+        return
+
     user_data[message.chat.id]["district"] = message.text
 
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -344,7 +348,10 @@ def inward_district(message):
 
 def inward_option(message):
 
-    user_data[message.chat.id]["action"] = message.text
+    if message.chat.id not in user_data:
+        return
+
+    user_data[message.chat.id]["action"] = message.text.strip()
 
     msg = bot.send_message(
         message.chat.id,
@@ -357,6 +364,9 @@ def inward_option(message):
 
 def inward_courier(message):
 
+    if message.chat.id not in user_data:
+        return
+
     user_data[message.chat.id]["courier"] = message.text
 
     msg = bot.send_message(message.chat.id,"Enter LR Number")
@@ -366,6 +376,9 @@ def inward_courier(message):
 
 def inward_lr(message):
 
+    if message.chat.id not in user_data:
+        return
+
     user_data[message.chat.id]["lr"] = message.text
 
     msg = bot.send_message(message.chat.id,"Enter Courier Date (dd-mm-yyyy)")
@@ -374,6 +387,9 @@ def inward_lr(message):
 
 
 def inward_date(message):
+
+    if message.chat.id not in user_data:
+        return
 
     user_data[message.chat.id]["date"] = message.text
 
@@ -389,6 +405,9 @@ def inward_date(message):
 
 
 def inward_spare_type(message):
+
+    if message.chat.id not in user_data:
+        return
 
     if message.text == "Others":
 
@@ -407,6 +426,9 @@ def inward_spare_type(message):
 
 def inward_spare_manual(message):
 
+    if message.chat.id not in user_data:
+        return
+
     user_data[message.chat.id]["spare"] = message.text
 
     msg = bot.send_message(message.chat.id,"Enter Quantity")
@@ -415,6 +437,9 @@ def inward_spare_manual(message):
 
 
 def inward_qty(message):
+
+    if message.chat.id not in user_data:
+        return
 
     try:
         qty = int(message.text)
@@ -430,6 +455,9 @@ def inward_qty(message):
 
 
 def inward_remarks(message):
+
+    if message.chat.id not in user_data:
+        return
 
     data = user_data[message.chat.id]
 
@@ -464,12 +492,17 @@ def add_device(message):
     if not check_permission(message,"/add_device"):
         return
 
+    user_data[message.chat.id] = {}
+
     msg = bot.send_message(message.chat.id,"Enter LR Number")
 
     bot.register_next_step_handler(msg,validate_lr)
 
 
 def validate_lr(message):
+
+    if message.chat.id not in user_data:
+        return
 
     lr = message.text
 
@@ -514,6 +547,9 @@ def validate_lr(message):
     bot.register_next_step_handler_by_chat_id(message.chat.id,get_model)
 
 def get_model(message):
+
+    if message.chat.id not in user_data:
+        return
 
     user_data[message.chat.id]["model"] = message.text
 
@@ -592,10 +628,14 @@ def read_serial(message):
 
             data = user_data[message.chat.id]
 
-            # Prevent duplicate dispatch
-            cursor.execute("SELECT * FROM spare_outward WHERE serial_number=?", (serial,))
+            cursor.execute("SELECT 1 FROM spare_outward WHERE serial_number=?", (serial,))
             if cursor.fetchone():
-                bot.send_message(message.chat.id,"⚠️ Serial already dispatched")
+                bot.send_message(message.chat.id, "⚠️ Serial already exists")
+                return
+
+            cursor.execute("SELECT 1 FROM spare_outward WHERE lr_number=?", (data["lr"],))
+            if cursor.fetchone():
+                bot.send_message(message.chat.id, "⚠️ LR already used")
                 return
 
             cursor.execute("""
@@ -818,41 +858,6 @@ def report(message):
     pos_df = add_total(pos_df)
     iris_df = add_total(iris_df)
 
-    # ================= LR SUMMARY =================
-    lr_df = pd.read_sql_query("""
-    SELECT 
-        s.district,
-        s.lr_number,
-        s.spare_name,
-        s.qty AS received,
-        COUNT(d.serial_number) AS serial_updated,
-        (s.qty - COUNT(d.serial_number)) AS pending,
-        SUM(CASE WHEN d.remarks='Replaced' THEN 1 ELSE 0 END) AS replaced,
-        SUM(CASE WHEN d.remarks='Available' THEN 1 ELSE 0 END) AS not_replaced
-    FROM spare_inward s
-    LEFT JOIN devices d ON s.lr_number = d.lr_number
-    WHERE s.action='Receive'
-    GROUP BY s.district, s.lr_number, s.spare_name, s.qty
-    """, conn)
-
-    lr_df.rename(columns={"pending": "Serial Update Pending"}, inplace=True)
-
-    # ================= SEND SUMMARY =================
-    send_df = pd.read_sql_query("""
-    SELECT 
-        district,
-        courier_name,
-        lr_number,
-        courier_date AS date,
-        spare_name,
-        qty
-    FROM spare_inward
-    WHERE action='Send'
-    ORDER BY district
-    """, conn)
-
-    send_df.insert(0, "Sl.no", range(1, len(send_df) + 1))
-
     # ================= DISTRICT SPARE =================
     # ================= DISTRICT SPARE =================
     # ================= DISTRICT SPARE =================
@@ -895,16 +900,20 @@ def report(message):
 
     with pd.ExcelWriter(file, engine="openpyxl") as writer:
         devices_df.to_excel(writer, sheet_name="Devices", index=False)
-        spare_df.to_excel(writer, sheet_name="Spare_Inward", index=False)
+        spare_df.to_excel(writer, sheet_name="Dispatch details", index=False)
         outward_df.to_excel(writer, sheet_name="Outward", index=False)
 
         pos_df.to_excel(writer, sheet_name="POS_Summary", index=False)
         iris_df.to_excel(writer, sheet_name="IRIS_Summary", index=False)
-        lr_df.to_excel(writer, sheet_name="LR_Summary", index=False)
-        send_df.to_excel(writer, sheet_name="SEND_Summary", index=False)
 
     # ================= FORMATTING =================
     wb = load_workbook(file)
+
+    if "LR_Summary" in wb.sheetnames:
+        del wb["LR_Summary"]
+
+    if "SEND_Summary" in wb.sheetnames:
+        del wb["SEND_Summary"]
 
     header_fill = PatternFill(start_color="305496", fill_type="solid")
     total_fill = PatternFill(start_color="FFD966", fill_type="solid")
@@ -920,6 +929,23 @@ def report(message):
         top=Side(style='thin'),
         bottom=Side(style='thin')
     )
+
+    red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+
+    def highlight_pending(ws):
+        headers = [cell.value for cell in ws[1]]
+        if "Serial Update Pending" not in headers:
+            return
+
+        col_idx = headers.index("Serial Update Pending") + 1
+
+        for row in ws.iter_rows(min_row=2):
+            cell = row[col_idx - 1]
+            if isinstance(cell.value, (int, float)) and cell.value > 0:
+                cell.fill = red_fill
+
+    highlight_pending(wb["POS_Summary"])
+    highlight_pending(wb["IRIS_Summary"])
 
     # ================= DISTRICT SPARE BALANCE (MANUAL WRITE) =================
     district_columns = ["spare_name", "opening_qty", "received_qty", "sent_qty", "balance_qty"]
@@ -939,7 +965,7 @@ def report(message):
     title_cell = ws_district["A1"]
     title_cell.value = title_text
     title_cell.font = Font(bold=True, size=16)
-    title_cell.alignment = align
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
     for col_idx in range(1, 7):
         t_cell = ws_district.cell(row=1, column=col_idx)
         t_cell.alignment = align
@@ -969,8 +995,13 @@ def report(message):
             for col_idx, col_name in enumerate(district_columns, start=1):
                 value = row_data[col_name]
                 cell = ws_district.cell(row=current_row, column=col_idx, value=value)
-                cell.alignment = align
-                cell.border = border
+                cell.border = Border(
+                    left=Side(style='thin'),
+                    right=Side(style='thin'),
+                    top=Side(style='thin'),
+                    bottom=Side(style='thin')
+                )
+                cell.alignment = Alignment(horizontal="center", vertical="center")
             current_row += 1
 
         current_row += 1  # one blank row between district sections
@@ -1258,6 +1289,9 @@ def pending_serials(message):
 
 def op_spare(message):
 
+    if message.chat.id not in user_data:
+        return
+
     if message.text == "Others":
 
         msg = bot.send_message(
@@ -1277,6 +1311,9 @@ def op_spare(message):
 #3️⃣ Manual spare name
 
 def op_spare_manual(message):
+
+    if message.chat.id not in user_data:
+        return
 
     user_data[message.chat.id]["spare"] = message.text
 
@@ -1303,6 +1340,9 @@ def op_select_district(message):
 
 def op_district(message):
 
+    if message.chat.id not in user_data:
+        return
+
     district = message.text
 
     if district not in districts:
@@ -1322,6 +1362,9 @@ def op_district(message):
 #6️⃣ Save opening stock
 
 def op_qty(message):
+
+    if message.chat.id not in user_data:
+        return
 
     data = user_data[message.chat.id]
 
@@ -1426,6 +1469,9 @@ def edit_opening_stock(message):
 
 def edit_op_spare(message):
 
+    if message.chat.id not in user_data:
+        return
+
     if message.text == "Others":
 
         msg = bot.send_message(
@@ -1445,6 +1491,9 @@ def edit_op_spare(message):
 #2️⃣ Manual Spare Name
 
 def edit_op_spare_manual(message):
+
+    if message.chat.id not in user_data:
+        return
 
     user_data[message.chat.id]["spare"] = message.text
 
@@ -1472,6 +1521,9 @@ def edit_op_district(message):
 
 def edit_op_qty(message):
 
+    if message.chat.id not in user_data:
+        return
+
     data = user_data[message.chat.id]
 
     district = message.text
@@ -1490,6 +1542,9 @@ def edit_op_qty(message):
 #5️⃣ Update Database
 
 def update_op_qty(message):
+
+    if message.chat.id not in user_data:
+        return
 
     data = user_data[message.chat.id]
 
@@ -1681,6 +1736,8 @@ def add_user(message):
         bot.send_message(message.chat.id,"❌ Admin only command")
         return
 
+    user_data[message.chat.id] = {}
+
     msg = bot.send_message(
         message.chat.id,
         "Send User ID to add"
@@ -1690,6 +1747,9 @@ def add_user(message):
 
 
 def save_user(message):
+
+    if message.chat.id not in user_data:
+        return
 
     try:
         new_user = int(message.text)
@@ -1847,6 +1907,9 @@ def outward_spare(message):
 
 def outward_district(message):
 
+    if message.chat.id not in user_data:
+        return
+
     user_data[message.chat.id]["district"] = message.text
 
     msg = bot.send_message(
@@ -1863,6 +1926,9 @@ def outward_district(message):
 
 def outward_date(message):
 
+    if message.chat.id not in user_data:
+        return
+
     user_data[message.chat.id]["date"] = message.text
 
     msg = bot.send_message(message.chat.id,"Enter Courier Name")
@@ -1871,6 +1937,9 @@ def outward_date(message):
 
 
 def outward_courier(message):
+
+    if message.chat.id not in user_data:
+        return
 
     user_data[message.chat.id]["courier"] = message.text
 
@@ -1881,6 +1950,9 @@ def outward_courier(message):
 #4️⃣ Spare Dropdown
 
 def outward_lr(message):
+
+    if message.chat.id not in user_data:
+        return
 
     user_data[message.chat.id]["lr"] = message.text
 
@@ -1898,6 +1970,9 @@ def outward_lr(message):
 
 def outward_spare_type(message):
 
+    if message.chat.id not in user_data:
+        return
+
     if message.text == "Others":
 
         msg = bot.send_message(message.chat.id, "Enter Spare Name")
@@ -1914,6 +1989,9 @@ def outward_spare_type(message):
 # ================= QUANTITY FUNCTION =================
 
 def outward_qty(message):
+
+    if message.chat.id not in user_data:
+        return
 
     try:
         qty = int(message.text)
@@ -1945,6 +2023,10 @@ def outward_qty(message):
         ask_serial_method(message)
 
     else:
+        cursor.execute("SELECT 1 FROM spare_outward WHERE lr_number=?", (data["lr"],))
+        if cursor.fetchone():
+            bot.send_message(message.chat.id, "⚠️ LR already used")
+            return
 
         cursor.execute("""
         INSERT INTO spare_outward(
@@ -2002,6 +2084,9 @@ def ask_serial_method(message):
 
 def serial_method(message):
 
+    if message.chat.id not in user_data:
+        return
+
     if message.text == "✍️ Manual Entry":
 
         msg = bot.send_message(message.chat.id,"Enter Serial Number")
@@ -2049,6 +2134,11 @@ def handle_excel_upload(message):
             bot.send_message(chat_id, "❌ Excel must contain column: serial_number")
             return
 
+        cursor.execute("SELECT 1 FROM spare_outward WHERE lr_number=?", (data["lr"],))
+        if cursor.fetchone():
+            bot.send_message(chat_id, "⚠️ LR already used")
+            return
+
         inserted = 0
 
         for raw_serial in df["serial_number"]:
@@ -2061,6 +2151,11 @@ def handle_excel_upload(message):
                 continue
 
             try:
+                cursor.execute("SELECT 1 FROM spare_outward WHERE serial_number=?", (serial,))
+                if cursor.fetchone():
+                    bot.send_message(chat_id, "⚠️ Serial already exists")
+                    return
+
                 cursor.execute("""
                 INSERT INTO spare_outward(
                 dispatch_date,
@@ -2128,6 +2223,16 @@ def save_manual_serial(message):
         return
 
     try:
+        cursor.execute("SELECT 1 FROM spare_outward WHERE serial_number=?", (serial,))
+        if cursor.fetchone():
+            bot.send_message(message.chat.id, "⚠️ Serial already exists")
+            return
+
+        cursor.execute("SELECT 1 FROM spare_outward WHERE lr_number=?", (data["lr"],))
+        if cursor.fetchone():
+            bot.send_message(message.chat.id, "⚠️ LR already used")
+            return
+
         cursor.execute("""
         INSERT INTO spare_outward(
         dispatch_date,
@@ -2194,7 +2299,10 @@ def cancel_process(message):
     if chat_id in user_data:
         del user_data[chat_id]
 
-    bot.clear_step_handler_by_chat_id(chat_id)
+    try:
+        bot.clear_step_handler_by_chat_id(chat_id)
+    except:
+        pass
 
     bot.send_message(
         chat_id,
